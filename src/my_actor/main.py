@@ -2,7 +2,7 @@
 Daily Amar Desh News Scraper - Apify Actor
 
 Scrapes news articles from www.dailyamardesh.com based on date filtering.
-Extracts title, description, and published_date from each article page.
+Extracts title (h1), description (main content), and published_date from each article page.
 """
 
 import asyncio
@@ -25,9 +25,6 @@ REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,bn;q=0.8",
 }
-
-# Site suffix to remove from titles
-SITE_SUFFIX = " | আমার দেশ"
 
 
 async def fetch_xml(url: str) -> Optional[str]:
@@ -72,33 +69,23 @@ def parse_news_sitemap(xml_content: str) -> List[Dict[str, Any]]:
 
     for url_elem in soup.find_all("url"):
         try:
-            # Extract URL from <loc>
             loc = url_elem.find("loc")
             if not loc or not loc.string:
                 continue
             article_url = loc.string.strip()
 
-            # Find news:news element
             news_elem = url_elem.find("news:news")
             if not news_elem:
                 continue
 
-            # Extract publication date
             pub_date_elem = news_elem.find("news:publication_date")
             published_date = None
             if pub_date_elem and pub_date_elem.string:
                 published_date = pub_date_elem.string.strip()
 
-            # Extract title
-            title_elem = news_elem.find("news:title")
-            title = None
-            if title_elem and title_elem.string:
-                title = title_elem.string.strip()
-
             if article_url and published_date:
                 articles.append({
                     "url": article_url,
-                    "title": title or "",
                     "published_date": published_date,
                 })
 
@@ -129,7 +116,6 @@ def parse_article_sitemap(xml_content: str) -> List[Dict[str, Any]]:
             if article_url and published_date:
                 articles.append({
                     "url": article_url,
-                    "title": "",
                     "published_date": published_date,
                 })
 
@@ -172,22 +158,25 @@ def extract_article_data(html: str, url: str, sitemap_date: Optional[str] = None
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # Extract title from <title> tag
-    title_tag = soup.find("title")
+    # Extract title from <h1> tag
+    h1 = soup.find("h1")
     title = ""
-    if title_tag:
-        title = title_tag.get_text().strip()
-        # Remove site suffix
-        if SITE_SUFFIX in title:
-            title = title.replace(SITE_SUFFIX, "").strip()
+    if h1:
+        title = h1.get_text().strip()
 
-    # Extract description from meta tag
-    meta_desc = soup.find("meta", {"name": "description"})
-    description = ""
-    if meta_desc and meta_desc.get("content"):
-        description = meta_desc.get("content", "").strip()
+    # Extract description from paragraphs (main content)
+    paragraphs = soup.find_all("p")
+    description_parts = []
+    for p in paragraphs:
+        text = p.get_text().strip()
+        if text and len(text) > 20:  # Only meaningful paragraphs
+            # Skip common non-content patterns
+            if not any(skip in text.lower() for skip in ["copyright", "all rights reserved", "facebook", "twitter"]):
+                description_parts.append(text)
 
-    # Extract published date from various sources
+    description = " ".join(description_parts).strip()
+
+    # Extract published date from multiple sources
     published_date = None
 
     # Try JSON-LD schema first
@@ -206,6 +195,14 @@ def extract_article_data(html: str, url: str, sitemap_date: Optional[str] = None
         meta_date = soup.find("meta", {"property": "article:published_time"})
         if meta_date and meta_date.get("content"):
             published_date = normalize_date(meta_date.get("content"))
+
+    # Try to extract from inline scripts (Next.js data)
+    if not published_date:
+        import re
+        date_patterns = re.findall(r'(\d{4}-\d{2}-\d{2}T[\d:]+\.?\d*[\+\-]?\d*:?\d*)', html)
+        if date_patterns:
+            # Use the first date found (usually the article publication date)
+            published_date = normalize_date(date_patterns[0])
 
     # Fallback to sitemap date
     if not published_date and sitemap_date:
@@ -277,33 +274,37 @@ async def process_sitemap(
 
         Actor.log.info(f"Found {len(sitemap_articles)} articles in sitemap")
 
-        # Filter by target date and fetch full article data
+        # Process each article
         for article_info in sitemap_articles:
             if max_articles and articles_processed >= max_articles:
                 break
 
-            article_date = normalize_date(article_info["published_date"])
-            if article_date == target_date:
-                Actor.log.info(f"Fetching article: {article_info['url']}")
+            # First check date from sitemap (quick filter)
+            sitemap_date = normalize_date(article_info["published_date"])
+            if sitemap_date and sitemap_date[:10] != target_date:
+                continue
 
-                html = await fetch_html(article_info["url"])
-                if html:
-                    article_data = extract_article_data(
-                        html,
-                        article_info["url"],
-                        article_info["published_date"]
-                    )
-                    if article_data:
-                        # Double-check date from article page matches
-                        if article_data["published_date"] == target_date:
-                            matching_articles.append(article_data)
-                            articles_processed += 1
-                        else:
-                            Actor.log.info(
-                                f"Skipping {article_info['url']}: "
-                                f"date mismatch (sitemap: {article_date}, "
-                                f"page: {article_data['published_date']})"
-                            )
+            Actor.log.info(f"Fetching article: {article_info['url']}")
+
+            html = await fetch_html(article_info["url"])
+            if html:
+                article_data = extract_article_data(
+                    html,
+                    article_info["url"],
+                    article_info["published_date"]
+                )
+                if article_data:
+                    # Exact date match on first 10 characters (yyyy-mm-dd)
+                    if article_data["published_date"][:10] == target_date:
+                        matching_articles.append(article_data)
+                        articles_processed += 1
+                        Actor.log.info(f"Added article: {article_data['title'][:50]}...")
+                    else:
+                        Actor.log.info(
+                            f"Skipping {article_info['url']}: "
+                            f"date mismatch (target: {target_date}, "
+                            f"article: {article_data['published_date'][:10]})"
+                        )
 
     Actor.log.info(f"Found {len(matching_articles)} matching articles in {sitemap_url}")
     return matching_articles

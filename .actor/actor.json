@@ -3,5 +3,5 @@
   "name": "amar-desh-news-scraper",
   "version": "0.1",
   "build": "pip3 install -r requirements.txt",
-  "run": "python3 -m src.amar_desh_scraper.main"
+  "run": "python -m my_actor"
 }
