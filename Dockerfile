@@ -8,5 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 COPY .actor/actor.json ./
 
+# Add src to Python path
+ENV PYTHONPATH=/src:$PYTHONPATH
+
 # Set run command
 CMD ["python", "-m", "my_actor"]
